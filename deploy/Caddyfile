@@ -1,0 +1,9 @@
+# Replace bot.example.com with your actual domain (must point at this host via DNS).
+# Caddy automatically obtains and renews a TLS certificate for it via ACME/Let's Encrypt.
+bot.example.com {
+	# Docker Compose deployment: proxy to the teleplay service by its Compose service name.
+	reverse_proxy teleplay:8080
+
+	# Non-Docker (systemd) deployment: comment the line above and uncomment this one instead.
+	# reverse_proxy localhost:8080
+}

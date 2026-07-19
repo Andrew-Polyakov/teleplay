@@ -1,0 +1,21 @@
+[Unit]
+Description=Teleplay Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=teleplay
+Group=teleplay
+WorkingDirectory=/opt/teleplay
+EnvironmentFile=/opt/teleplay/.env
+ExecStartPre=/usr/bin/node dist/db/migrate.js
+ExecStart=/usr/bin/node dist/bot/index.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/teleplay
+
+[Install]
+WantedBy=multi-user.target

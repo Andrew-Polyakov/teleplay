@@ -1,0 +1,35 @@
+{
+  "name": "teleplay",
+  "version": "0.1.0",
+  "description": "Teleplay - a Telegram bot for organizing tennis matches",
+  "type": "module",
+  "private": true,
+  "main": "dist/bot/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/bot/index.ts",
+    "start": "node dist/bot/index.js",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx src/db/migrate.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "dotenv": "^16.4.5",
+    "drizzle-orm": "^0.33.0",
+    "grammy": "^1.28.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.5.4",
+    "@typescript-eslint/eslint-plugin": "^8.5.0",
+    "@typescript-eslint/parser": "^8.5.0",
+    "drizzle-kit": "^0.24.2",
+    "eslint": "^9.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.2",
+    "vitest": "^2.1.1"
+  }
+}
