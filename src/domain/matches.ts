@@ -3,7 +3,7 @@ import { matches, matchParticipants } from '../db/schema.js';
 import type { MatchType } from '../db/schema.js';
 import type { DomainContext } from './types.js';
 import { DomainError } from './types.js';
-import { findUserByTelegramId } from './users.js';
+import { findUserById, findUserByTelegramId } from './users.js';
 import { declareCandidateQueue } from './invitationQueue.js';
 
 export class UnregisteredParticipantError extends DomainError {
@@ -85,6 +85,10 @@ export function createMatch(ctx: DomainContext, input: CreateMatchInput) {
     .run();
 
   let queueSlotIndex = 0;
+  // Insert every participant row before sending anything, so each invitation can name
+  // the full lineup — not just whoever happened to be inserted before it.
+  const directInvitees: { id: number }[] = [];
+  const queueSpecs: { slotIndex: number; candidateUserIds: number[] }[] = [];
   for (const spec of input.otherMainParticipants) {
     if (spec.kind === 'direct') {
       const invitee = resolveUserOrThrow(ctx, spec.telegramUserId);
@@ -99,15 +103,11 @@ export function createMatch(ctx: DomainContext, input: CreateMatchInput) {
           updatedAt: now,
         })
         .run();
-      ctx.notify(invitee.id, buildMatchInviteMessage(ctx, match.id), { kind: 'matchInvite', matchId: match.id });
+      directInvitees.push(invitee);
     } else {
-      const candidateUserIds = spec.candidateTelegramUserIds.map((tid) => resolveUserOrThrow(ctx, tid).id);
-      declareCandidateQueue(ctx, {
-        matchId: match.id,
-        slotType: 'main',
+      queueSpecs.push({
         slotIndex: queueSlotIndex,
-        candidateUserIds,
-        declaredByUserId: creator.id,
+        candidateUserIds: spec.candidateTelegramUserIds.map((tid) => resolveUserOrThrow(ctx, tid).id),
       });
       queueSlotIndex += 1;
     }
@@ -125,9 +125,27 @@ export function createMatch(ctx: DomainContext, input: CreateMatchInput) {
         updatedAt: now,
       })
       .run();
-    ctx.notify(benchUser.id, buildBenchStandbyInviteMessage(ctx, match.id), {
+  }
+
+  for (const invitee of directInvitees) {
+    ctx.notify(invitee.id, buildMatchInviteMessage(ctx, match.id, invitee.id), {
+      kind: 'matchInvite',
+      matchId: match.id,
+    });
+  }
+  for (const benchUser of benchUsers) {
+    ctx.notify(benchUser.id, buildBenchStandbyInviteMessage(ctx, match.id, benchUser.id), {
       kind: 'benchInvite',
       matchId: match.id,
+    });
+  }
+  for (const queueSpec of queueSpecs) {
+    declareCandidateQueue(ctx, {
+      matchId: match.id,
+      slotType: 'main',
+      slotIndex: queueSpec.slotIndex,
+      candidateUserIds: queueSpec.candidateUserIds,
+      declaredByUserId: creator.id,
     });
   }
 
@@ -203,13 +221,29 @@ export function confirmMainParticipant(ctx: DomainContext, matchId: number, user
   if (!participant || participant.slotType !== 'main') {
     throw new DomainError(`User ${userId} is not a main participant of match ${matchId}`);
   }
+  // Re-confirming is a no-op; without this guard a repeated /confirm would re-notify everyone.
+  const alreadyConfirmed = participant.participantStatus === 'confirmed';
   const now = ctx.clock.now().getTime();
   ctx.db
     .update(matchParticipants)
     .set({ participantStatus: 'confirmed', updatedAt: now })
     .where(eq(matchParticipants.id, participant.id))
     .run();
-  return checkAndConfirmMatch(ctx, matchId);
+  const match = checkAndConfirmMatch(ctx, matchId);
+
+  if (!alreadyConfirmed) {
+    const confirmerName = findUserById(ctx, userId)?.telegramUserId ?? `user ${userId}`;
+    const mains = getMainParticipants(ctx, matchId);
+    const remaining = expectedMainSlots(match.type) - mains.filter((p) => p.participantStatus === 'confirmed').length;
+    const text =
+      match.overallStatus === 'confirmed'
+        ? `✅ ${confirmerName} confirmed — everyone is in, match is on! 🎾 ${formatMatchSummary(match)}`
+        : `✅ ${confirmerName} confirmed: ${formatMatchSummary(match)}. Waiting on ${remaining} more player(s).`;
+    for (const other of mains.filter((p) => p.userId !== userId && p.participantStatus !== 'declined')) {
+      ctx.notify(other.userId, text);
+    }
+  }
+  return match;
 }
 
 export function declineMainParticipant(ctx: DomainContext, matchId: number, userId: number) {
@@ -231,20 +265,45 @@ export function declineMainParticipant(ctx: DomainContext, matchId: number, user
   return getMatch(ctx, matchId);
 }
 
-export function buildMatchInviteMessage(ctx: DomainContext, matchId: number): string {
-  const match = getMatch(ctx, matchId);
-  if (!match) throw new DomainError(`Match ${matchId} not found`);
-  return formatMatchSummary(match);
+function formatDateTime(scheduledAtMs: number): string {
+  const date = new Date(scheduledAtMs);
+  const day = date.toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+  const hh = String(date.getUTCHours()).padStart(2, '0');
+  const mm = String(date.getUTCMinutes()).padStart(2, '0');
+  return `${day} at ${hh}:${mm} UTC`;
 }
 
-export function buildBenchStandbyInviteMessage(ctx: DomainContext, matchId: number): string {
+/**
+ * The 📅/👥/📍 detail lines shared by invite, bench, and queue-offer messages, so a
+ * recipient always sees when, with whom, and where. Their own slot reads "you".
+ */
+export function buildMatchDetails(ctx: DomainContext, matchId: number, recipientUserId?: number): string {
   const match = getMatch(ctx, matchId);
   if (!match) throw new DomainError(`Match ${matchId} not found`);
-  return `You've been added as a bench/standby player for: ${formatMatchSummary(match)}`;
+  const players = getMainParticipants(ctx, matchId).map((p) =>
+    p.userId === recipientUserId ? 'you' : (findUserById(ctx, p.userId)?.telegramUserId ?? `user ${p.userId}`),
+  );
+  return [
+    `📅 ${formatDateTime(match.scheduledAt)}`,
+    `👥 ${players.join(', ')}`,
+    `📍 ${match.venue ?? 'venue TBD'}`,
+  ].join('\n');
+}
+
+export function buildMatchInviteMessage(ctx: DomainContext, matchId: number, recipientUserId?: number): string {
+  const match = getMatch(ctx, matchId);
+  if (!match) throw new DomainError(`Match ${matchId} not found`);
+  const creator = findUserById(ctx, match.createdByUserId);
+  return `🎾 ${creator?.telegramUserId ?? 'Someone'} invited you to a ${match.type} match\n${buildMatchDetails(ctx, matchId, recipientUserId)}`;
+}
+
+export function buildBenchStandbyInviteMessage(ctx: DomainContext, matchId: number, recipientUserId?: number): string {
+  const match = getMatch(ctx, matchId);
+  if (!match) throw new DomainError(`Match ${matchId} not found`);
+  return `🎾 You've been added as a bench (standby) player for a ${match.type} match\n${buildMatchDetails(ctx, matchId, recipientUserId)}`;
 }
 
 export function formatMatchSummary(match: { type: MatchType; scheduledAt: number; venue: string | null }): string {
-  const when = new Date(match.scheduledAt).toISOString();
   const venue = match.venue ?? 'venue TBD';
-  return `${match.type} match at ${when} — ${venue}`;
+  return `${match.type} match on ${formatDateTime(match.scheduledAt)} — ${venue}`;
 }

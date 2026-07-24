@@ -39,7 +39,35 @@ describe('match-scheduling', () => {
     expect(participants).toHaveLength(2);
     expect(participants.find((p) => p.userId === creator.id)?.participantStatus).toBe('confirmed');
     expect(participants.find((p) => p.userId === invitee.id)?.participantStatus).toBe('invited');
-    expect(harness.sent.some((m) => m.userId === invitee.id)).toBe(true);
+    const invite = harness.sent.find((m) => m.userId === invitee.id);
+    expect(invite).toBeDefined();
+    // The receiver must see who invited them, the full lineup ("you" for themselves), and the venue.
+    expect(invite!.text).toContain(`${creator.telegramUserId} invited you`);
+    expect(invite!.text).toContain('you');
+    expect(invite!.text).toContain('venue TBD');
+  });
+
+  it('notifies the other participants when an invitee confirms', () => {
+    const { ctx } = harness;
+    const creator = register('creator');
+    const invitee = register('invitee');
+    const match = createMatch(ctx, {
+      type: 'singles',
+      scheduledAt: new Date('2026-02-01T10:00:00.000Z'),
+      creatorTelegramUserId: creator.telegramUserId,
+      otherMainParticipants: [{ kind: 'direct', telegramUserId: invitee.telegramUserId }],
+    });
+    harness.sent.length = 0;
+
+    confirmMainParticipant(ctx, match.id, invitee.id);
+    const note = harness.sent.find((m) => m.userId === creator.id);
+    expect(note?.text).toContain('invitee confirmed');
+    expect(note?.text).toContain('match is on');
+
+    // Re-confirming must not spam the others again.
+    harness.sent.length = 0;
+    confirmMainParticipant(ctx, match.id, invitee.id);
+    expect(harness.sent).toHaveLength(0);
   });
 
   it('creates a doubles match with exactly 4 main slots', () => {

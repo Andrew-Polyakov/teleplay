@@ -3,7 +3,7 @@ import { invitationQueueEntries, matchParticipants } from '../db/schema.js';
 import type { SlotType } from '../db/schema.js';
 import type { DomainContext } from './types.js';
 import { DomainError } from './types.js';
-import { getMatch, checkAndConfirmMatch, formatMatchSummary, getMainParticipants } from './matches.js';
+import { getMatch, checkAndConfirmMatch, buildMatchDetails, getMainParticipants } from './matches.js';
 
 export interface DeclareCandidateQueueInput {
   matchId: number;
@@ -35,10 +35,10 @@ function slotEntries(ctx: DomainContext, matchId: number, slotType: SlotType, sl
     .all();
 }
 
-function buildInvitationMessage(ctx: DomainContext, matchId: number): string {
+function buildInvitationMessage(ctx: DomainContext, matchId: number, recipientUserId: number): string {
   const match = getMatch(ctx, matchId);
   if (!match) throw new DomainError(`Match ${matchId} not found`);
-  return `You're invited to play: ${formatMatchSummary(match)}. Reply within 1 hour to accept.`;
+  return `🎾 You're invited to play a ${match.type} match\n${buildMatchDetails(ctx, matchId, recipientUserId)}\nReply within 1 hour to accept.`;
 }
 
 /** Activates the next `queued` entry for a slot, or notifies the declarer if the queue is exhausted. */
@@ -63,7 +63,7 @@ function activateNext(ctx: DomainContext, matchId: number, slotType: SlotType, s
     .set({ status: 'invited', invitedAt: now, expiresAt: now + invitationTimeoutMs(ctx), updatedAt: now })
     .where(eq(invitationQueueEntries.id, next.id))
     .run();
-  ctx.notify(next.candidateUserId, buildInvitationMessage(ctx, matchId), {
+  ctx.notify(next.candidateUserId, buildInvitationMessage(ctx, matchId, next.candidateUserId), {
     kind: 'invitationOffer',
     entryId: next.id,
   });
