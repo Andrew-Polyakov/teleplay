@@ -14,6 +14,10 @@ export interface AppConfig {
   publicUrl: string;
   webhookPath: string;
   webhookSecretToken: string;
+  wizardTimeStart: string;
+  wizardTimeEnd: string;
+  wizardTimeStepMinutes: number;
+  wizardTimeoutMinutes: number;
 }
 
 function parseNumber(value: string | undefined, fallback: number): number {
@@ -51,5 +55,9 @@ export function loadConfig(): AppConfig {
     publicUrl: stripTrailingSlash(process.env.PUBLIC_URL ?? ''),
     webhookPath: process.env.WEBHOOK_PATH ?? '/telegram/webhook',
     webhookSecretToken: process.env.WEBHOOK_SECRET_TOKEN ?? '',
+    wizardTimeStart: process.env.WIZARD_TIME_START ?? '07:00',
+    wizardTimeEnd: process.env.WIZARD_TIME_END ?? '22:00',
+    wizardTimeStepMinutes: parseNumber(process.env.WIZARD_TIME_STEP_MINUTES, 60),
+    wizardTimeoutMinutes: parseNumber(process.env.WIZARD_TIMEOUT_MINUTES, 10),
   };
 }

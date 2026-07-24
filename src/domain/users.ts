@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 import { users } from '../db/schema.js';
 import type { DomainContext } from './types.js';
 
@@ -46,6 +46,11 @@ export function findUserByTelegramId(ctx: DomainContext, telegramUserId: string)
 
 export function findUserById(ctx: DomainContext, id: number): UserRecord | undefined {
   return ctx.db.select().from(users).where(eq(users.id, id)).get();
+}
+
+/** Everyone who has started the bot, ordered by display name — feeds the /match wizard's player picker. */
+export function listRegisteredUsers(ctx: DomainContext): UserRecord[] {
+  return ctx.db.select().from(users).orderBy(asc(users.displayName), asc(users.id)).all();
 }
 
 /** Builds the shareable deep-link a creator can forward to someone who hasn't started the bot yet. */

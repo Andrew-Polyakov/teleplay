@@ -14,6 +14,8 @@ export function startWorkers(
     reminderPollIntervalMinutes: number;
     invitationPollIntervalMinutes: number;
   },
+  /** Optional extra sweep (the /match wizard's idle-state purge), run once a minute. */
+  wizardSweep?: () => void,
 ): WorkerHandle {
   const reminderTimer = setInterval(
     () => {
@@ -37,10 +39,21 @@ export function startWorkers(
     config.invitationPollIntervalMinutes * 60 * 1000,
   );
 
+  const wizardTimer = wizardSweep
+    ? setInterval(() => {
+        try {
+          wizardSweep();
+        } catch (err) {
+          console.error('Wizard-sweep worker error:', err);
+        }
+      }, 60 * 1000)
+    : undefined;
+
   return {
     stop() {
       clearInterval(reminderTimer);
       clearInterval(invitationTimer);
+      if (wizardTimer) clearInterval(wizardTimer);
     },
   };
 }

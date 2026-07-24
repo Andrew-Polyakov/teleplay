@@ -8,7 +8,7 @@ function normalizeUsername(raw: string): string {
 }
 
 /**
- * Parses `/newmatch <singles|doubles> <ISO-time> <slot>... [bench:@a,@b]`.
+ * Parses `/match <singles|doubles> <ISO-time> <slot>... [bench:@a,@b]`.
  * Each <slot> is either `@username` (direct invite) or `queue:@a,@b,@c` (ordered candidate queue).
  */
 export function parseNewMatchArgs(args: string[]): ParseResult<{
@@ -21,7 +21,7 @@ export function parseNewMatchArgs(args: string[]): ParseResult<{
     return {
       ok: false,
       error:
-        'Usage: /newmatch <singles|doubles> <ISO time> <@player | queue:@a,@b,...>... [bench:@a,@b,...]',
+        'Usage: /match <singles|doubles> <ISO time> <@player | queue:@a,@b,...>... [bench:@a,@b,...]',
     };
   }
 
