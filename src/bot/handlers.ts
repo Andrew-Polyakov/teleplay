@@ -9,8 +9,17 @@ import { cancelMatch, proposeReschedule, retireFromDoublesMatch } from '../domai
 import { acceptInvitationEntry, declineInvitationEntry } from '../domain/invitationQueue.js';
 import { getUpcomingMatchesForUser, getPendingInvitationsView } from '../domain/schedule.js';
 import { parseNewMatchArgs, parseRescheduleArgs, parseMatchIdAndText, parseMatchId } from './parse.js';
+import { startWizard, handleWizardCallback, handleWizardText, type WizardDeps } from './wizard/handlers.js';
+import { describeInvitees } from './messages.js';
+import type { Menu } from '@grammyjs/menu';
+import type { PromptStore } from './menu/prompts.js';
 
-function telegramIdOf(ctx: Context): string {
+export interface MenuBundle {
+  root: Menu<Context>;
+  prompts: PromptStore;
+}
+
+export function telegramIdOf(ctx: { from?: { id?: number; username?: string } }): string {
   const username = ctx.from?.username;
   return username ? `@${username}` : `id:${ctx.from?.id}`;
 }
@@ -43,7 +52,7 @@ function replyWithError(ctx: Context, err: unknown) {
   return ctx.reply('Something went wrong handling that.');
 }
 
-export function registerHandlers(bot: Bot, domain: DomainContext) {
+export function registerHandlers(bot: Bot, domain: DomainContext, wizard: WizardDeps, menu?: MenuBundle) {
   bot.command('start', async (ctx) => {
     const tid = telegramIdOf(ctx);
     if (!ctx.chat) return;
@@ -53,15 +62,28 @@ export function registerHandlers(bot: Bot, domain: DomainContext) {
       displayName: ctx.from?.first_name ?? tid,
     });
     await ctx.reply(
-      "Welcome to Teleplay! You're registered. Use /newmatch to set up a match, or /schedule to see what's coming up.",
+      "Welcome to Teleplay! You're registered. Send /menu to browse everything, or /match to set up a match right away.",
     );
   });
 
-  bot.command('newmatch', async (ctx) => {
+  if (menu) {
+    bot.command('menu', async (ctx) => {
+      const user = await requireRegisteredUser(ctx, domain);
+      if (!user) return;
+      await ctx.reply('🎾 Teleplay menu', { reply_markup: menu.root });
+    });
+  }
+
+  bot.command('match', async (ctx) => {
     const creator = await requireRegisteredUser(ctx, domain);
     if (!creator) return;
 
-    const parsed = parseNewMatchArgs(args(ctx));
+    const argList = args(ctx);
+    if (argList.length === 0) {
+      return void (await startWizard(ctx, domain, wizard, creator));
+    }
+
+    const parsed = parseNewMatchArgs(argList);
     if (!parsed.ok) return void (await ctx.reply(parsed.error));
 
     try {
@@ -72,10 +94,19 @@ export function registerHandlers(bot: Bot, domain: DomainContext) {
         otherMainParticipants: parsed.value.otherMainParticipants,
         benchTelegramUserIds: parsed.value.benchUsernames,
       });
-      await ctx.reply(`Match ${match.id} created (${parsed.value.type}). Invitations sent.`);
+      await ctx.reply(
+        `Match ${match.id} created (${parsed.value.type})${describeInvitees(
+          parsed.value.otherMainParticipants,
+          parsed.value.benchUsernames,
+        )}. Invitations sent.`,
+      );
     } catch (err) {
       await replyWithError(ctx, err);
     }
+  });
+
+  bot.command('newmatch', async (ctx) => {
+    await ctx.reply('/newmatch is now /match — send /match to set up a match.');
   });
 
   bot.command('confirm', async (ctx) => {
@@ -249,23 +280,70 @@ export function registerHandlers(bot: Bot, domain: DomainContext) {
     const [namespace, action, idRaw] = (ctx.callbackQuery.data ?? '').split(':');
     const id = Number(idRaw);
 
+    if (namespace === 'wiz') {
+      return void (await handleWizardCallback(ctx, domain, wizard, user, action, idRaw));
+    }
+
     try {
+      let note = 'Done.';
       if (namespace === 'match' && action === 'confirm') {
-        confirmMainParticipant(domain, id, user.id);
+        const match = confirmMainParticipant(domain, id, user.id);
+        note = match?.overallStatus === 'confirmed' ? '✅ You confirmed — everyone is in, match is on!' : '✅ You confirmed.';
       } else if (namespace === 'match' && action === 'decline') {
         declineMainParticipant(domain, id, user.id);
+        note = '❌ You declined.';
       } else if (namespace === 'bench' && action === 'confirm') {
         confirmBenchStandby(domain, id, user.id);
+        note = "✅ You're on standby.";
       } else if (namespace === 'bench' && action === 'decline') {
         declineBenchStandby(domain, id, user.id);
+        note = '❌ You declined the bench spot.';
       } else if (namespace === 'invite' && action === 'accept') {
         acceptInvitationEntry(domain, { entryId: id, respondingUserId: user.id });
+        note = "✅ Accepted — you're in.";
       } else if (namespace === 'invite' && action === 'decline') {
         declineInvitationEntry(domain, { entryId: id, respondingUserId: user.id });
+        note = '❌ You declined.';
       }
-      await ctx.answerCallbackQuery({ text: 'Done.' });
+
+      // Stamp the outcome onto the invitation itself and drop its buttons — the toast
+      // alone is easy to miss and leaving live buttons makes the tap look ignored.
+      const tapped = ctx.callbackQuery.message;
+      if (note !== 'Done.' && tapped && 'text' in tapped && tapped.text) {
+        try {
+          await ctx.editMessageText(`${tapped.text}\n\n${note}`);
+        } catch {
+          // Message too old to edit (48h Telegram limit) — the toast still shows.
+        }
+      }
+      await ctx.answerCallbackQuery({ text: note });
     } catch (err) {
-      await ctx.answerCallbackQuery({ text: err instanceof Error ? err.message : 'Error' });
+      try {
+        await ctx.answerCallbackQuery({ text: err instanceof Error ? err.message : 'Error' });
+      } catch {
+        // Stale callback queries (>~30s old, e.g. queued across a restart) can't be
+        // answered at all — dropping the answer is all we can do.
+      }
+    }
+  });
+
+  // Plain-text fallthrough (commands are consumed above): typed @usernames feed an
+  // active wizard's player/bench step, then a pending menu prompt (venue entry) may
+  // claim the reply; everything else is ignored.
+  bot.on('message:text', async (ctx) => {
+    const user = findUserByTelegramId(domain, telegramIdOf(ctx));
+    if (!user) return;
+    if (await handleWizardText(ctx, domain, wizard, user)) return;
+    if (!menu || ctx.message.text.startsWith('/')) return;
+
+    const prompt = menu.prompts.get(user.telegramUserId, domain.clock.now(), wizard.config.timeoutMinutes);
+    if (!prompt) return;
+    menu.prompts.clear(user.telegramUserId);
+    try {
+      const updated = submitVenue(domain, prompt.matchId, user.id, ctx.message.text.trim());
+      await ctx.reply(`📍 Venue for match #${prompt.matchId} set to: ${updated.venue}`);
+    } catch (err) {
+      await replyWithError(ctx, err);
     }
   });
 }

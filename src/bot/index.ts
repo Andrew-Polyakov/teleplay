@@ -5,6 +5,10 @@ import { systemClock, type DomainContext } from '../domain/types.js';
 import { createTelegramNotifier } from './notifier.js';
 import { registerHandlers } from './handlers.js';
 import { startWorkers } from './workers.js';
+import { WizardStore } from './wizard/state.js';
+import type { WizardDeps } from './wizard/handlers.js';
+import { PromptStore } from './menu/prompts.js';
+import { createMenus } from './menu/menus.js';
 import { startWebhookServer, type WebhookServerHandle } from './server.js';
 
 async function main() {
@@ -22,19 +26,49 @@ async function main() {
   const db = createDb(config.databasePath);
   const bot = new Bot(config.telegramBotToken);
 
+  // Without this, any error escaping a handler (e.g. answering a stale callback query
+  // after a restart) kills the whole process — and an unacknowledged update would then
+  // be re-delivered on startup, crash-looping the bot.
+  bot.catch((err) => {
+    console.error(`Error handling update ${err.ctx.update.update_id}:`, err.error);
+  });
+
   const domain: DomainContext = {
     db,
     clock: systemClock,
     notify: createTelegramNotifier(bot, db),
   };
 
-  registerHandlers(bot, domain);
+  const prompts = new PromptStore();
+  const wizard: WizardDeps = {
+    store: new WizardStore(),
+    config: {
+      timeStart: config.wizardTimeStart,
+      timeEnd: config.wizardTimeEnd,
+      timeStepMinutes: config.wizardTimeStepMinutes,
+      timeoutMinutes: config.wizardTimeoutMinutes,
+    },
+    prompts,
+  };
 
-  const workers = startWorkers(domain, {
-    reminderLeadHours: config.reminderLeadHours,
-    reminderPollIntervalMinutes: config.reminderPollIntervalMinutes,
-    invitationPollIntervalMinutes: config.invitationPollIntervalMinutes,
-  });
+  // The menu plugin must see callback queries before the generic handler.
+  const rootMenu = createMenus(domain, { wizard, prompts });
+  bot.use(rootMenu);
+
+  registerHandlers(bot, domain, wizard, { root: rootMenu, prompts });
+
+  const workers = startWorkers(
+    domain,
+    {
+      reminderLeadHours: config.reminderLeadHours,
+      reminderPollIntervalMinutes: config.reminderPollIntervalMinutes,
+      invitationPollIntervalMinutes: config.invitationPollIntervalMinutes,
+    },
+    () => {
+      wizard.store.sweep(domain.clock.now(), wizard.config.timeoutMinutes);
+      prompts.sweep(domain.clock.now(), wizard.config.timeoutMinutes);
+    },
+  );
 
   let webhookServer: WebhookServerHandle | undefined;
 

@@ -10,6 +10,7 @@ export interface ScheduledMatchView {
   overallStatus: string;
   venue: string | null;
   slotType: string;
+  participantStatus: string;
 }
 
 /** Matches the user is a main/bench participant of, still pending or confirmed, soonest first. */
@@ -31,7 +32,7 @@ export function getUpcomingMatchesForUser(ctx: DomainContext, userId: number): S
     .all()
     .filter((m) => m.overallStatus === 'pending' || m.overallStatus === 'confirmed');
 
-  const slotTypeByMatchId = new Map(participantRows.map((p) => [p.matchId, p.slotType]));
+  const participantByMatchId = new Map(participantRows.map((p) => [p.matchId, p]));
 
   return matchRows.map((m) => ({
     matchId: m.id,
@@ -39,7 +40,8 @@ export function getUpcomingMatchesForUser(ctx: DomainContext, userId: number): S
     scheduledAt: m.scheduledAt,
     overallStatus: m.overallStatus,
     venue: m.venue,
-    slotType: slotTypeByMatchId.get(m.id) ?? 'main',
+    slotType: participantByMatchId.get(m.id)?.slotType ?? 'main',
+    participantStatus: participantByMatchId.get(m.id)?.participantStatus ?? 'invited',
   }));
 }
 
